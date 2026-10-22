@@ -148,6 +148,7 @@ VARIANTES = {
     'msys2-libstdcxx': ("MSYS2 UCRT64 (clang, libstdc++)", "MSYS2 UCRT64 (clang, libstdc++)"),
     'msys2-libstdcxx-sansvulkan': ("MSYS2 UCRT64 (clang, libstdc++), sans Vulkan", "MSYS2 UCRT64 (clang, libstdc++), without Vulkan"),
     'gcc13-libstdcxx': ("GCC 13 (Ubuntu 24.04), libstdc++, sans Vulkan", "GCC 13 (Ubuntu 24.04), libstdc++, without Vulkan"),
+    'clang18-libstdcxx': ("Clang 18 (Ubuntu 24.04), libstdc++, sans Vulkan", "Clang 18 (Ubuntu 24.04), libstdc++, without Vulkan"),
     'appleclang-libcxx': ("Apple Clang (Xcode), libc++, sans Vulkan (Metal et OpenGL)",
                           "Apple Clang (Xcode), libc++, without Vulkan (Metal and OpenGL)"),
 }
@@ -160,7 +161,10 @@ CHAINES = [
     ('msys-avec', KITS21, '{B}-windows-x64-msys2-libstdcxx-statique.zip', 'windows', 'x86_64', 'msys2-libstdcxx', 'statique', 'tsv:msys-avec'),
     ('msys-sans', KITS21, '{B}-windows-x64-msys2-libstdcxx-statique-sansvulkan.zip', 'windows', 'x86_64', 'msys2-libstdcxx-sansvulkan',
      'statique', 'tsv:msys-sans'),
-    ('linux', KITS21, '{B}-linux-x64-gcc13-libstdcxx-statique.zip', 'linux', 'x86_64', 'gcc13-libstdcxx', 'statique', 'tsv:linux-gcc13'),
+    # Ces archives portent « gcc13 » dans leur nom, mais clang 18.1.3 les a construites (mesuré le 22/10 : leurs
+    # .a, KIT_COMPILER) : Jenga prend host-clang avant host-gcc, et WSL avait /usr/bin/clang. Publiees sous
+    # leur vrai nom de chaine.
+    ('linux', KITS21, '{B}-linux-x64-gcc13-libstdcxx-statique.zip', 'linux', 'x86_64', 'clang18-libstdcxx', 'statique', 'tsv:linux-gcc13'),
     ('mac-arm64', os.path.join(MAC, 'kits-macos-arm64', 'kits'), '{B}-kit-macos-arm64-appleclang-libcxx-statique.zip', 'macos', 'arm64',
      'appleclang-libcxx', 'statique', 'md:' + os.path.join(MAC, 'kits-macos-arm64', 'journaux', 'resume.md')),
     ('mac-x86_64', os.path.join(MAC, 'kits-macos-x86_64', 'kits'), '{B}-kit-macos-x86_64-appleclang-libcxx-statique.zip', 'macos', 'x86_64',
@@ -277,8 +281,13 @@ def exige(systeme, architecture, variante, vulkan):
             en += "; at startup, a Vulkan graphics driver (vulkan-1.dll)"
         return {'fr': fr, 'en': en}
     if systeme == 'linux':
-        return {'fr': "Linux x86_64, Ubuntu 24.04 ou plus récent (glibc 2.39) ; gcc 13 ou plus récent (libstdc++) ; X11 et OpenGL",
-                'en': "Linux x86_64, Ubuntu 24.04 or newer (glibc 2.39); gcc 13 or newer (libstdc++); X11 and OpenGL"}
+        # Le kit EXIGE la famille de compilateur de ses archives (kitrequire de Jenga) : clang pour un kit clang.
+        if variante.startswith('gcc'):
+            cfr, cen = "gcc 13 ou plus récent (libstdc++)", "gcc 13 or newer (libstdc++)"
+        else:
+            cfr, cen = "clang 18 ou plus récent, avec libstdc++ (celui d'Ubuntu)", "clang 18 or newer, with libstdc++ (Ubuntu's)"
+        return {'fr': "Linux x86_64, Ubuntu 24.04 ou plus récent (glibc 2.39) ; %s ; X11 et OpenGL" % cfr,
+                'en': "Linux x86_64, Ubuntu 24.04 or newer (glibc 2.39); %s; X11 and OpenGL" % cen}
     return {'fr': "macOS 12 ou plus récent (%s) ; Xcode (Apple Clang, libc++)" % architecture,
             'en': "macOS 12 or newer (%s); Xcode (Apple Clang, libc++)" % architecture}
 

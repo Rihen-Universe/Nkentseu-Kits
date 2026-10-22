@@ -18,7 +18,7 @@
 #               tag de Jenga lu dans son config/JENGA_VERSION, et les chaînes demandées ;
 #   windows   : clang18-libcxx (le compilateur du paquet NKCode, publication « latest » de
 #               Rihen-Universe/NKCode-Beta) et msys2-libstdcxx (msys2/setup-msys2), avec et sans Vulkan ;
-#   linux     : ubuntu-24.04, gcc 13, libstdc++, sans Vulkan (la chaîne des kits Linux du 21/10) ;
+#   linux     : ubuntu-24.04, clang 18, libstdc++, sans Vulkan (la chaîne RÉELLE des kits Linux du 21/10) ;
 #   macos     : arm64 et x86_64, Apple Clang, libc++, sans Vulkan, macOS 12 au minimum ;
 #               chaque job : les bibliothèques, MakeKit, l'ÉPREUVE (outils/construire_kits.sh : un programme
 #               construit en Debug et en Release contre le kit, puis lancé), un artefact kits-<chaîne> ;
@@ -32,7 +32,7 @@
 # de Rodolf.
 #
 #   gh workflow run publier-kits.yml -R Rihen-Universe/Nkentseu-Kits                       (essai, tout)
-#   gh workflow run publier-kits.yml -R Rihen-Universe/Nkentseu-Kits -f chaines="linux-x86_64-gcc13-libstdcxx-statique" -f bibliotheques="NKCore NKMath"
+#   gh workflow run publier-kits.yml -R Rihen-Universe/Nkentseu-Kits -f chaines="linux-x86_64-clang18-libstdcxx-statique" -f bibliotheques="NKCore NKMath"
 # =============================================================================
 name: Publier les kits
 
@@ -110,7 +110,7 @@ jobs:
           import json, os, sys
           CONNUES = ['windows-x86_64-clang18-libcxx-statique', 'windows-x86_64-clang18-libcxx-sansvulkan-statique',
                      'windows-x86_64-msys2-libstdcxx-statique', 'windows-x86_64-msys2-libstdcxx-sansvulkan-statique',
-                     'linux-x86_64-gcc13-libstdcxx-statique',
+                     'linux-x86_64-clang18-libstdcxx-statique',
                      'macos-arm64-appleclang-libcxx-statique', 'macos-x86_64-appleclang-libcxx-statique']
           # Les 34 bibliothèques publiques utilisables (mesure du 21/10 : sans les trois intégrations, dont les
           # en-têtes ne partent pas dans un kit), dans l'ordre de lien.
@@ -276,9 +276,17 @@ jobs:
     env:
       PYTHONPATH: ${{ github.workspace }}/jenga-src
       NK_ENABLE_VULKAN: "0"
-      # Jenga préfère host-clang à host-gcc sous Linux (Core/Builder.py) et le runner porte clang : les kits
-      # Linux sont ceux de gcc 13 (libstdc++), comme ceux du 21/10.
-      NK_TOOLCHAIN: host-gcc
+      # LA CHAÎNE DES KITS LINUX DU 21/10 ÉTAIT CLANG 18 (mesuré le 22/10 : « clang version 18.1.3 » dans les
+      # archives, KIT_COMPILER = clang), pas gcc 13 comme l'annonçait leur nom : Jenga préfère host-clang à
+      # host-gcc sous Linux (Core/Builder.py) et Ubuntu 24.04 porte /usr/bin/clang. On la garde : celle que
+      # Jenga choisit seul, et qu'un apprenant aura.
+      #
+      # PAS de `--toolchain host-gcc` (essai 39758756603) : Jenga 2.9.0 fige is_gcc / is_clang dans
+      # LinuxBuilder.__init__ avec la chaîne AUTOMATIQUE (host-clang), puis Build.py re-choisit la chaîne
+      # demandée sans les rafraîchir ; gcc reçoit alors `-include-pch` (« fatal error: -pch »). Reproduit sous
+      # WSL avec le tag v2.9.0 ; corrigé dès que les deux drapeaux sont recalculés. À corriger dans Jenga.
+      # NK_TOOLCHAIN_ATTENDU ne choisit rien : construire_kits.sh VÉRIFIE que chaque construction l'a eue.
+      NK_TOOLCHAIN_ATTENDU: host-clang
     steps:
       - name: Ce dépôt (outils, épreuves)
         uses: actions/checkout@v4
@@ -309,10 +317,13 @@ jobs:
       - name: Dépendances système (X11, GL, ALSA ; la police DejaVu des épreuves)
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++ libx11-dev libxrandr-dev libxext-dev libgl1-mesa-dev libasound2-dev fonts-dejavu-core
-          V=$(g++ -dumpversion)
-          echo "g++ $V"
-          case "$V" in 13*) ;; *) echo "::error::g++ $V et non 13 : renommer la chaine gcc13"; exit 1 ;; esac
+          sudo apt-get install -y libx11-dev libxrandr-dev libxext-dev libgl1-mesa-dev libasound2-dev fonts-dejavu-core
+          # Jenga cherche d'abord /usr/bin/clang et /usr/bin/clang++ (GlobalToolchains.py) : c'est CE clang-là
+          # qui construit, et il doit être un clang 18 (le nom de la chaîne le dit).
+          test -x /usr/bin/clang++ || { echo "::error::/usr/bin/clang++ absent : Jenga prendrait une autre chaine"; exit 1; }
+          V=$(/usr/bin/clang++ --version | head -1)
+          echo "$V"
+          case "$V" in *"clang version 18."*) ;; *) echo "::error::$V et non clang 18 : renommer la chaine clang18"; exit 1 ;; esac
 
       - name: Construire et éprouver - ${{ matrix.chaine }}
         run: |

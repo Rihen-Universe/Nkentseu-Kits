@@ -16,8 +16,11 @@
 # (| Nom | archive | épreuve Debug | épreuve Release |), que publier_kits.py lit : seul un kit « vert | vert »
 # entre dans une publication.
 #
-# Environnement : PY (python ou python3), NK_TOOLCHAIN (facultatif, ex. host-gcc sous Linux : Jenga préfère
-# host-clang), NK_ENABLE_VULKAN (0 pour les variantes sans Vulkan), VULKAN_SDK (variantes avec Vulkan).
+# Environnement : PY (python ou python3), NK_ENABLE_VULKAN (0 pour les variantes sans Vulkan), VULKAN_SDK
+# (variantes avec Vulkan), NK_TOOLCHAIN_ATTENDU (facultatif : la chaîne que Jenga DOIT avoir choisie seul,
+# vérifiée dans chaque journal ; une autre rend la construction rouge, le nom de la chaîne mentirait),
+# NK_TOOLCHAIN (facultatif, passé en `--toolchain` ; À ÉVITER avec Jenga 2.9.0 sous Linux et macOS : ses
+# builders figent la famille du compilateur avant ce choix, essai 39758756603, gcc a reçu `-include-pch`).
 # =============================================================================
 set -u
 RACINE=$(cd "${1:?racine Nkentseu}" && pwd)
@@ -29,6 +32,10 @@ LISTE="$*"
 PY="${PY:-python3}"
 # (bash 3.2 de macOS : ni tableau vide sous set -u, ni tableau associatif)
 TC=""; [ -n "${NK_TOOLCHAIN:-}" ] && TC="--toolchain $NK_TOOLCHAIN"
+chaine_tenue() { # chaine_tenue <journal> : 0 si Jenga y a pris NK_TOOLCHAIN_ATTENDU (ou si rien n'est attendu)
+	[ -z "${NK_TOOLCHAIN_ATTENDU:-}" ] && return 0
+	tr -d '\033' < "$1" | sed -E 's/\[[0-9;]*m//g' | grep -a -q -E "Toolchain:[[:space:]]+${NK_TOOLCHAIN_ATTENDU}([[:space:]]|\$)"
+}
 J="$SORTIE/journaux"
 K="$SORTIE/kits"
 TMP="$SORTIE/tmp"
@@ -92,6 +99,11 @@ eprouver() { # eprouver <Nom> <programme|-> <config> : 0 si construit et lancé 
 			'        files(["main.cpp"])' "        $fn()" > "$W/Essai.jenga"
 	fi
 	(cd "$W" && "$PY" -m Jenga build --config "$C" --no-daemon $TC > "build_$C.log" 2>&1)
+	if ! chaine_tenue "$W/build_$C.log"; then
+		cp "$W/build_$C.log" "$J/essai_${B}_${nom}_$C.log"
+		echo "   $B $nom $C : Jenga n'a pas pris la chaine ${NK_TOOLCHAIN_ATTENDU}" >&2
+		return 1
+	fi
 	local exe; exe=$(find "$W/Build/Bin" -type f \( -name App -o -name App.exe \) 2> /dev/null | grep "/$C-" | head -1)
 	if [ -z "$exe" ]; then
 		cp "$W/build_$C.log" "$J/essai_${B}_${nom}_$C.log"
@@ -122,7 +134,7 @@ t0=$(date +%s)
 for C in Debug Release; do
 	for B in $LISTE; do
 		L="$J/build_${B}_${C}.log"
-		if (cd "$RACINE" && "$PY" -m Jenga build --target "$B" --config "$C" --no-daemon $TC > "$L" 2>&1); then
+		if (cd "$RACINE" && "$PY" -m Jenga build --target "$B" --config "$C" --no-daemon $TC > "$L" 2>&1) && chaine_tenue "$L"; then
 			eval "ETAT_${B}_$C=ok"
 			echo "$B $C : construit ($(grep -a -c 'warning:' "$L") avertissement(s))"
 		else
