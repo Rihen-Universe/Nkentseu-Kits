@@ -1,0 +1,452 @@
+# AUTEUR : TEUGUIA TADJUIDJE Rodolf Séderis — Rihen
+# =============================================================================
+# publier-kits.yml — construire, éprouver et PUBLIER les kits des bibliothèques publiques de Nkentseu,
+# DEPUIS LES SERVEURS DE GITHUB (22/10/2026).
+#
+# Pourquoi ici : le poste de Rodolf n'envoie pas 3 Go (environ 100 Ko/s, coupure au-delà d'environ 20 Mo,
+# mesuré le 22/10). Ce flux construit tout sur les machines de GitHub et publie dans CE dépôt public avec son
+# propre GITHUB_TOKEN : aucun secret neuf.
+#
+# ÉCART À UNE RÈGLE, écrit ici comme il se doit : les kits macOS devaient s'ajouter à build-macos.yml du
+# moteur (décision du 14/10). Le job kits-macos de build-macos.yml RESTE en place ; mais la publication vit
+# dans Nkentseu-Kits, parce que seul le jeton de ce dépôt peut y publier sans secret neuf. Le job macOS
+# d'ici reprend le sien, avec l'épreuve commune des trois systèmes.
+#
+# Ce qu'il fait :
+#   preparer  : le commit du moteur (entrée « moteur », sinon la tête de main de Rihen-Universe/Nkentseu,
+#               dépôt public : seuls ses sous-modules publics viennent, les autres ont « update = none »), le
+#               tag de Jenga lu dans son config/JENGA_VERSION, et les chaînes demandées ;
+#   windows   : clang18-libcxx (le compilateur du paquet NKCode, publication « latest » de
+#               Rihen-Universe/NKCode-Beta) et msys2-libstdcxx (msys2/setup-msys2), avec et sans Vulkan ;
+#   linux     : ubuntu-24.04, gcc 13, libstdc++, sans Vulkan (la chaîne des kits Linux du 21/10) ;
+#   macos     : arm64 et x86_64, Apple Clang, libc++, sans Vulkan, macOS 12 au minimum ;
+#               chaque job : les bibliothèques, MakeKit, l'ÉPREUVE (outils/construire_kits.sh : un programme
+#               construit en Debug et en Release contre le kit, puis lancé), un artefact kits-<chaîne> ;
+#   publier   : les artefacts et les publications déjà faites (outils/precedents.sh), puis
+#               outils/publier_kits.py (une version par bibliothèque, qui n'avance que si SON kit change),
+#               outils/verifier_publication.py (contrôle indépendant), et outils/creer_publications.sh :
+#               une publication <id>-v<version> par bibliothèque qui a changé, et le lot kits-AAAA-MM-JJ.
+#
+# ESSAI (entrée « essai », vraie par défaut) : tout se construit, et seuls des BROUILLONS sont créés
+# (essai-<run>-<étiquette>), jamais une publication. Pour publier pour de bon : essai=false, après l'accord
+# de Rodolf.
+#
+#   gh workflow run publier-kits.yml -R Rihen-Universe/Nkentseu-Kits                       (essai, tout)
+#   gh workflow run publier-kits.yml -R Rihen-Universe/Nkentseu-Kits -f chaines="linux-x86_64-gcc13-libstdcxx-statique" -f bibliotheques="NKCore NKMath"
+# =============================================================================
+name: Publier les kits
+
+on:
+  workflow_dispatch:
+    inputs:
+      essai:
+        description: "Essai : tout construire, ne créer que des BROUILLONS (aucune publication)"
+        type: boolean
+        default: true
+      moteur:
+        description: "Commit de Rihen-Universe/Nkentseu (vide : la tête de main)"
+        type: string
+        default: ""
+      chaines:
+        description: "Chaînes, séparées par des espaces (vide : les sept)"
+        type: string
+        default: ""
+      bibliotheques:
+        description: "Bibliothèques, séparées par des espaces (vide : les 34 publiques)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publier-kits
+  cancel-in-progress: false
+
+env:
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: "1"
+
+jobs:
+  preparer:
+    runs-on: ubuntu-24.04
+    outputs:
+      moteur: ${{ steps.moteur.outputs.sha }}
+      jenga: ${{ steps.jenga.outputs.ref }}
+      windows: ${{ steps.chaines.outputs.windows }}
+      linux: ${{ steps.chaines.outputs.linux }}
+      macos: ${{ steps.chaines.outputs.macos }}
+      bibliotheques: ${{ steps.chaines.outputs.bibliotheques }}
+      sansvulkan: ${{ steps.chaines.outputs.sansvulkan }}
+    steps:
+      - name: Moteur (Rihen-Universe/Nkentseu, sans sous-modules)
+        uses: actions/checkout@v4
+        with:
+          repository: Rihen-Universe/Nkentseu
+          ref: ${{ inputs.moteur || 'main' }}
+          path: nkentseu
+
+      - name: Commit du moteur
+        id: moteur
+        run: |
+          SHA=$(git -C nkentseu rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Moteur : Rihen-Universe/Nkentseu@$SHA"
+
+      - name: Version de Jenga exigée par le moteur
+        id: jenga
+        run: |
+          V=$(grep -v '^#' nkentseu/config/JENGA_VERSION | tr -d '[:space:]')
+          test -n "$V" || { echo "::error::JENGA_VERSION vide ou introuvable"; exit 1; }
+          bash nkentseu/.github/scripts/ref-jenga.sh "$V" ""
+
+      - name: Chaînes et bibliothèques demandées
+        id: chaines
+        env:
+          CHAINES: ${{ inputs.chaines }}
+          BIBLIOTHEQUES: ${{ inputs.bibliotheques }}
+        run: |
+          python3 - << 'FIN'
+          import json, os, sys
+          CONNUES = ['windows-x86_64-clang18-libcxx-statique', 'windows-x86_64-clang18-libcxx-sansvulkan-statique',
+                     'windows-x86_64-msys2-libstdcxx-statique', 'windows-x86_64-msys2-libstdcxx-sansvulkan-statique',
+                     'linux-x86_64-gcc13-libstdcxx-statique',
+                     'macos-arm64-appleclang-libcxx-statique', 'macos-x86_64-appleclang-libcxx-statique']
+          # Les 34 bibliothèques publiques utilisables (mesure du 21/10 : sans les trois intégrations, dont les
+          # en-têtes ne partent pas dans un kit), dans l'ordre de lien.
+          TOUTES = ('NKPlatform NKCore NKMemory NKContainers NKMath NKThreading NKLogger NKTime NKFileSystem NKStream '
+                    'NKReflection NKSerialization NKNetwork NKConverse NKImage NKFont NKAudio NKMedia NKEvent NKWindow NKSL '
+                    'NKRHI NKCanvas NKRenderer NKVFX NKECS NKUI NKGui NKCamera NKCollision NKPhysics NKAnima NKNavigation NKXR').split()
+          # Une variante SANS Vulkan n'existe que pour les kits qui embarquent NKRHI (mesuré le 21/10).
+          VULKAN = ['NKRHI', 'NKCanvas', 'NKRenderer', 'NKVFX', 'NKCamera']
+          chaines = os.environ['CHAINES'].split() or CONNUES
+          inconnues = [c for c in chaines if c not in CONNUES]
+          if inconnues:
+              sys.exit('chaine(s) inconnue(s) : %s ; connues : %s' % (' '.join(inconnues), ' '.join(CONNUES)))
+          biblios = os.environ['BIBLIOTHEQUES'].split() or TOUTES
+          inconnues = [b for b in biblios if b not in TOUTES]
+          if inconnues:
+              sys.exit('bibliotheque(s) inconnue(s) : %s' % ' '.join(inconnues))
+          win, lin, mac = [], [], []
+          for c in chaines:
+              if c.startswith('windows-'):
+                  win.append({'chaine': c, 'compilateur': 'clang18' if '-clang18-' in c else 'msys2',
+                              'vulkan': 'sans' if '-sansvulkan-' in c else 'avec'})
+              elif c.startswith('linux-'):
+                  lin.append({'chaine': c})
+              else:
+                  arch = c.split('-')[1]
+                  mac.append({'chaine': c, 'arch': arch, 'runner': 'macos-latest' if arch == 'arm64' else 'macos-15-intel'})
+          sans = [b for b in biblios if b in VULKAN]
+          if not sans:  # aucune bibliothèque demandée n'a de variante sans Vulkan : pas de job pour rien
+              win = [w for w in win if w['vulkan'] != 'sans']
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
+              f.write('windows=%s\nlinux=%s\nmacos=%s\n' % (json.dumps(win), json.dumps(lin), json.dumps(mac)))
+              f.write('bibliotheques=%s\nsansvulkan=%s\n' % (' '.join(biblios), ' '.join(sans)))
+          print('chaines :', ' '.join(chaines))
+          print('bibliotheques (%d) : %s' % (len(biblios), ' '.join(biblios)))
+          FIN
+
+  windows:
+    needs: preparer
+    if: ${{ needs.preparer.outputs.windows != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.preparer.outputs.windows) }}
+    runs-on: windows-latest
+    timeout-minutes: 340
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONPATH: ${{ github.workspace }}/jenga-src
+    steps:
+      - name: Ce dépôt (outils, épreuves)
+        uses: actions/checkout@v4
+        with:
+          path: kits-depot
+
+      - name: Moteur (+ sous-modules publics)
+        uses: actions/checkout@v4
+        with:
+          repository: Rihen-Universe/Nkentseu
+          ref: ${{ needs.preparer.outputs.moteur }}
+          submodules: recursive
+          path: nkentseu
+
+      - name: Jenga (le tag exigé par le moteur)
+        uses: actions/checkout@v4
+        with:
+          repository: Rihen-Universe/Jenga
+          ref: ${{ needs.preparer.outputs.jenga }}
+          path: jenga-src
+
+      - name: Python
+        id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compilateur du paquet NKCode (clang 18, libc++)
+        if: ${{ matrix.compilateur == 'clang18' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh release download --repo Rihen-Universe/NKCode-Beta --pattern 'NKCode-win64.zip' --dir "$RUNNER_TEMP"
+          "$(cygpath -u '${{ steps.python.outputs.python-path }}')" -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); [z.extract(n, sys.argv[2]) for n in z.namelist() if '/llvm-mingw/' in n.replace(chr(92), '/')]" "$(cygpath -w "$RUNNER_TEMP/NKCode-win64.zip")" "$(cygpath -w "$RUNNER_TEMP/nkcode")"
+          CXX=$(find "$RUNNER_TEMP/nkcode" -path '*llvm-mingw/bin/x86_64-w64-mingw32-clang++.exe' | head -1)
+          test -n "$CXX" || { echo "::error::pas de llvm-mingw dans NKCode-win64.zip"; exit 1; }
+          LL=$(dirname "$CXX")
+          V=$("$CXX" --version | head -1)
+          echo "$V"
+          case "$V" in *"clang version 18."*) ;; *) echo "::error::le paquet NKCode ne porte plus clang 18 ($V) : renommer la chaine clang18"; exit 1 ;; esac
+          echo "CLANG_MINGW_CC=$(cygpath -w "$LL/x86_64-w64-mingw32-clang.exe")" >> "$GITHUB_ENV"
+          echo "CLANG_MINGW_CXX=$(cygpath -w "$CXX")" >> "$GITHUB_ENV"
+          cygpath -w "$LL" >> "$GITHUB_PATH"
+
+      - name: MSYS2 UCRT64 (clang, libstdc++)
+        if: ${{ matrix.compilateur == 'msys2' }}
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-lld
+            mingw-w64-ucrt-x86_64-gcc
+
+      - name: MSYS2 devant le clang du runner
+        if: ${{ matrix.compilateur == 'msys2' }}
+        run: |
+          set -eu
+          M=$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')
+          "$M/ucrt64/bin/clang++.exe" --version | head -1
+          echo "CLANG_MINGW_CC=$(cygpath -w "$M/ucrt64/bin/clang.exe")" >> "$GITHUB_ENV"
+          echo "CLANG_MINGW_CXX=$(cygpath -w "$M/ucrt64/bin/clang++.exe")" >> "$GITHUB_ENV"
+          cygpath -w "$M/ucrt64/bin" >> "$GITHUB_PATH"
+
+      - name: Vulkan (en-têtes et chargeur, variantes avec Vulkan)
+        if: ${{ matrix.vulkan == 'avec' }}
+        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: 1.3.296.0
+          vulkan-components: Vulkan-Headers, Vulkan-Loader
+          vulkan-use-cache: true
+
+      - name: Vulkan demandé, ou écarté
+        run: |
+          if [ '${{ matrix.vulkan }}' = avec ]; then
+            test -n "${VULKAN_SDK:-}" || { echo "::error::VULKAN_SDK absent"; exit 1; }
+            echo "NK_ENABLE_VULKAN=1" >> "$GITHUB_ENV"
+          else
+            echo "NK_ENABLE_VULKAN=0" >> "$GITHUB_ENV"
+            echo "VULKAN_SDK=" >> "$GITHUB_ENV"
+          fi
+
+      - name: Construire et éprouver - ${{ matrix.chaine }}
+        run: |
+          export PY="$(cygpath -u '${{ steps.python.outputs.python-path }}')"
+          LISTE='${{ needs.preparer.outputs.bibliotheques }}'
+          [ '${{ matrix.vulkan }}' = sans ] && LISTE='${{ needs.preparer.outputs.sansvulkan }}'
+          bash kits-depot/outils/construire_kits.sh nkentseu '${{ matrix.chaine }}' sortie kits-depot/epreuves $LISTE
+
+      - name: Artefact kits-${{ matrix.chaine }}
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kits-${{ matrix.chaine }}
+          path: |
+            sortie/kits/
+            sortie/journaux/
+          retention-days: 7
+          if-no-files-found: warn
+
+  linux:
+    needs: preparer
+    if: ${{ needs.preparer.outputs.linux != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.preparer.outputs.linux) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    env:
+      PYTHONPATH: ${{ github.workspace }}/jenga-src
+      NK_ENABLE_VULKAN: "0"
+      # Jenga préfère host-clang à host-gcc sous Linux (Core/Builder.py) et le runner porte clang : les kits
+      # Linux sont ceux de gcc 13 (libstdc++), comme ceux du 21/10.
+      NK_TOOLCHAIN: host-gcc
+    steps:
+      - name: Ce dépôt (outils, épreuves)
+        uses: actions/checkout@v4
+        with:
+          path: kits-depot
+
+      - name: Moteur (+ sous-modules publics)
+        uses: actions/checkout@v4
+        with:
+          repository: Rihen-Universe/Nkentseu
+          ref: ${{ needs.preparer.outputs.moteur }}
+          submodules: recursive
+          path: nkentseu
+
+      - name: Jenga (le tag exigé par le moteur)
+        uses: actions/checkout@v4
+        with:
+          repository: Rihen-Universe/Jenga
+          ref: ${{ needs.preparer.outputs.jenga }}
+          path: jenga-src
+
+      - name: Python
+        id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Dépendances système (X11, GL, ALSA ; la police DejaVu des épreuves)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ libx11-dev libxrandr-dev libxext-dev libgl1-mesa-dev libasound2-dev fonts-dejavu-core
+          V=$(g++ -dumpversion)
+          echo "g++ $V"
+          case "$V" in 13*) ;; *) echo "::error::g++ $V et non 13 : renommer la chaine gcc13"; exit 1 ;; esac
+
+      - name: Construire et éprouver - ${{ matrix.chaine }}
+        run: |
+          export PY='${{ steps.python.outputs.python-path }}'
+          bash kits-depot/outils/construire_kits.sh nkentseu '${{ matrix.chaine }}' sortie kits-depot/epreuves ${{ needs.preparer.outputs.bibliotheques }}
+
+      - name: Artefact kits-${{ matrix.chaine }}
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kits-${{ matrix.chaine }}
+          path: |
+            sortie/kits/
+            sortie/journaux/
+          retention-days: 7
+          if-no-files-found: warn
+
+  macos:
+    needs: preparer
+    if: ${{ needs.preparer.outputs.macos != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.preparer.outputs.macos) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 340
+    env:
+      PYTHONPATH: ${{ github.workspace }}/jenga-src
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+      # Sans Vulkan : sur macOS, Vulkan n'est que MoltenVK et exigerait le chargeur chez l'apprenant ; NKRHI
+      # garde Metal et OpenGL.
+      NK_ENABLE_VULKAN: "0"
+      # Les outils d'Apple (ar, libtool) écrivent l'heure dans les archives .a ; à zéro, une reconstruction
+      # identique donne les mêmes octets (publier_kits.py compare de toute façon les membres, sans leurs dates).
+      ZERO_AR_DATE: "1"
+    steps:
+      - name: Ce dépôt (outils, épreuves)
+        uses: actions/checkout@v4
+        with:
+          path: kits-depot
+
+      - name: Moteur (+ sous-modules publics)
+        uses: actions/checkout@v4
+        with:
+          repository: Rihen-Universe/Nkentseu
+          ref: ${{ needs.preparer.outputs.moteur }}
+          submodules: recursive
+          path: nkentseu
+
+      - name: Jenga (le tag exigé par le moteur)
+        uses: actions/checkout@v4
+        with:
+          repository: Rihen-Universe/Jenga
+          ref: ${{ needs.preparer.outputs.jenga }}
+          path: jenga-src
+
+      - name: Python
+        id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Construire et éprouver - ${{ matrix.chaine }}
+        run: |
+          export PY='${{ steps.python.outputs.python-path }}'
+          bash kits-depot/outils/construire_kits.sh nkentseu '${{ matrix.chaine }}' sortie kits-depot/epreuves ${{ needs.preparer.outputs.bibliotheques }}
+
+      - name: Artefact kits-${{ matrix.chaine }}
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kits-${{ matrix.chaine }}
+          path: |
+            sortie/kits/
+            sortie/journaux/
+          retention-days: 7
+          if-no-files-found: warn
+
+  publier:
+    needs: [preparer, windows, linux, macos]
+    if: ${{ !cancelled() && needs.preparer.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # Le disque /mnt du runner : artefacts, publications précédentes, publication et lot (plus de 10 Go).
+      T: /mnt/kits
+    steps:
+      - name: Ce dépôt (outils)
+        uses: actions/checkout@v4
+
+      - name: Place sur /mnt
+        run: |
+          sudo mkdir -p "$T"
+          sudo chown "$(id -u):$(id -g)" "$T"
+          df -h /mnt | tail -1
+
+      - name: Artefacts des constructions
+        uses: actions/download-artifact@v4
+        with:
+          pattern: kits-*
+          path: /mnt/kits/sources
+
+      - name: Publications précédentes (jamais un brouillon)
+        run: bash outils/precedents.sh "$T/precedents"
+
+      - name: llvm-nm (symboles exportés, pour la fois suivante)
+        run: |
+          NM=$(ls /usr/lib/llvm-*/bin/llvm-nm 2> /dev/null | sort -V | tail -1 || true)
+          if [ -z "$NM" ]; then sudo apt-get update && sudo apt-get install -y llvm && NM=$(command -v llvm-nm); fi
+          test -n "$NM" || { echo "::error::llvm-nm introuvable"; exit 1; }
+          echo "NK_LLVM_NM=$NM" >> "$GITHUB_ENV"
+          "$NM" --version | head -2
+
+      - name: Ranger la publication (versions, manifestes, empreintes, lot)
+        run: |
+          python3 outils/publier_kits.py --moteur '${{ needs.preparer.outputs.moteur }}' --date "$(date -u +%F)" \
+            --sources "$T/sources" --precedent "$T/precedents" --sortie "$T/publication" | tee "$T/publier.log"
+          ls "$T/publication"
+
+      - name: Vérifier la publication (contrôle indépendant)
+        run: python3 outils/verifier_publication.py "$T/publication" "$T/sources" "$T/precedents"
+
+      - name: Créer les publications${{ inputs.essai && ' (BROUILLONS, essai)' || '' }}
+        run: |
+          bash outils/creer_publications.sh "$T/publication" '${{ inputs.essai }}' | tee "$T/creer.log"
+          {
+            echo "### Kits : ${{ inputs.essai && 'ESSAI, brouillons seulement' || 'publiés' }}"
+            echo
+            echo "Moteur : Rihen-Universe/Nkentseu@${{ needs.preparer.outputs.moteur }} ; Jenga ${{ needs.preparer.outputs.jenga }}"
+            echo
+            echo '```'
+            cat "$T/publier.log" "$T/creer.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

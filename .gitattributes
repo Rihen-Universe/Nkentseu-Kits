@@ -1,0 +1,9 @@
+# AUTEUR : TEUGUIA TADJUIDJE Rodolf Séderis — Rihen
+# Fins de ligne LF partout : les runners Windows extraient avec core.autocrlf, et bash refuse un script en CRLF.
+*.sh   text eol=lf
+*.py   text eol=lf
+*.yml  text eol=lf
+*.cpp  text eol=lf
+*.h    text eol=lf
+*.md   text eol=lf
+*.zip  binary
