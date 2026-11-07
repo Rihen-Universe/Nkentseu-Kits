@@ -117,6 +117,21 @@ eprouver() { # eprouver <Nom> <programme|-> <config> : 0 si construit et lancé 
 	[ "$code" = 0 ]
 }
 
+# (07/11/2026, 1.5.8) LE KIT COMMUN NKCanvas : le kit publié sous le nom NKCanvas porte AUSSI NKNavigation et NKCollision (FoodHunt en a besoin :
+# « NKNavigation/NkGridPath.h file not found » en construisant avec le kit du site, constaté par Rodolf sur une autre machine). Pour NKCanvas, MakeKit extrait donc
+# les trois, et les deux autres bibliothèques se construisent avant (jenga kit ne construit pas). Les autres modules ne changent pas.
+cibles_kit() { # cibles_kit <module> : les cibles que MakeKit extrait dans le kit de ce module
+	case "$1" in
+	NKCanvas) echo "NKCanvas,NKNavigation,NKCollision" ;;
+	*) echo "$1" ;;
+	esac
+}
+extras_kit() { # extras_kit <module> : les bibliotheques en plus a construire pour son kit
+	case "$1" in
+	NKCanvas) echo "NKNavigation NKCollision" ;;
+	esac
+}
+
 programmes() { # les épreuves propres à une bibliothèque, d'après ce que son kit contient
 	local B=$1 inc="$TMP/Kits/$1/include"
 	case "$B" in
@@ -137,6 +152,14 @@ for C in Debug Release; do
 		if (cd "$RACINE" && "$PY" -m Jenga build --target "$B" --config "$C" --no-daemon $TC > "$L" 2>&1) && chaine_tenue "$L"; then
 			eval "ETAT_${B}_$C=ok"
 			echo "$B $C : construit ($(grep -a -c 'warning:' "$L") avertissement(s))"
+			for X in $(extras_kit "$B"); do # (07/11) NKCanvas : NKNavigation et NKCollision pour le kit commun
+				if (cd "$RACINE" && "$PY" -m Jenga build --target "$X" --config "$C" --no-daemon $TC > "$J/build_${X}_${C}.log" 2>&1) && chaine_tenue "$J/build_${X}_${C}.log"; then
+					echo "$X $C : construit (kit commun de $B)"
+				else
+					eval "ETAT_${B}_$C=ECHEC"
+					echo "$X $C : ECHEC (kit commun de $B)"
+				fi
+			done
 		else
 			eval "ETAT_${B}_$C=ECHEC"
 			echo "$B $C : ECHEC"
@@ -153,7 +176,7 @@ for B in $LISTE; do
 		echo "| $B | non construit | - | - |" >> "$R"; continue
 	fi
 	rm -rf "$TMP/Kits/$B" "$TMP/$B"-kit-*.zip
-	if ! (cd "$RACINE" && "$PY" scripts/MakeKit.py --name "$B" --target "$B" --sortie "$(chemin "$TMP")" > "$J/makekit_$B.log" 2>&1); then
+	if ! (cd "$RACINE" && "$PY" scripts/MakeKit.py --name "$B" --target "$(cibles_kit "$B")" --sortie "$(chemin "$TMP")" > "$J/makekit_$B.log" 2>&1); then
 		echo "| $B | MakeKit en echec | - | - |" >> "$R"; continue
 	fi
 	Z=$(ls "$TMP/$B"-kit-*.zip 2> /dev/null | head -1)
